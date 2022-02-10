@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # Moonraker Timelapse component installer
 #
 # Copyright (C) 2021 Christoph Frei <fryakatkop@gmail.com>
@@ -21,11 +21,11 @@ fi
 set -e
 
 # Find SRCDIR from the pathname of this script
-SRCDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )"/ && pwd )"
+SRCDIR="$(dirname "$(readlink -f "$0")")"
 
 # Default Parameters
 MOONRAKER_TARGET_DIR="${HOME}/moonraker/moonraker/components"
-SYSTEMDDIR="/etc/systemd/system"
+SYSTEMDDIR="/etc/init.d"
 KLIPPER_CONFIG_DIR="${HOME}/klipper_config"
 FFMPEG_BIN="/usr/bin/ffmpeg"
 
@@ -36,9 +36,9 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 function stop_klipper {
-    if [ "$(sudo systemctl list-units --full -all -t service --no-legend | grep -F "klipper.service")" ]; then
+    if [ "$(ls /etc/init.d | grep -F "klipper")" ]; then
         echo "Klipper service found! Stopping during Install."
-        sudo systemctl stop klipper
+        /etc/init.d/klipper stop
     else
         echo "Klipper service not found, please install Klipper first"
         exit 1
@@ -46,9 +46,9 @@ function stop_klipper {
 }
 
 function stop_moonraker {
-    if [ "$(sudo systemctl list-units --full -all -t service --no-legend | grep -F "moonraker.service")" ]; then
+    if [ "$(ls /etc/init.d | grep -F "moonraker")" ]; then
         echo "Moonraker service found! Stopping during Install."
-        sudo systemctl stop moonraker
+        /etc/init.d/moonraker stop
     else
         echo "Moonraker service not found, please install Moonraker first"
         exit 1
@@ -76,7 +76,7 @@ function link_extension {
 
 function install_script {
 # Create systemd service file
-    SERVICE_FILE="${SYSTEMDDIR}/timelapse.service"
+    SERVICE_FILE="${SYSTEMDDIR}/timelapse"
     #[ -f $SERVICE_FILE ] && return
     if [ -f $SERVICE_FILE ]; then
         # Force remove
@@ -84,32 +84,40 @@ function install_script {
     fi
 
     echo "Installing system start script..."
-    sudo /bin/sh -c "cat > ${SERVICE_FILE}" << EOF
-[Unit]
-Description=Dummy Service for timelapse plugin
-After=moonraker.service
-Wants=moonraker.service
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c "sleep 1; echo 'Restarting Klipper and Moonraker...'"
-ExecStopPost=systemctl restart klipper
-ExecStopPost=systemctl restart moonraker
-TimeoutStopSec=1s
-[Install]
-WantedBy=multi-user.target
+    /bin/sh -c "cat > ${SERVICE_FILE}" << EOF
+#!/bin/sh /etc/rc.common
+# Put this inside /etc/init.d/
+# Dummy service or moonraker's update_manager
+
+START=91
+STOP=10
+USE_PROCD=1
+
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /bin/sh -c "sleep 1; echo 'Restarting Klipper and Moonraker...'"
+    #procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+stop_service() {
+    /etc/init.d/klipper restart && /etc/init.d/moonraker restart
+}
 EOF
 # Use systemctl to enable the systemd service script
-    sudo systemctl daemon-reload
-    sudo systemctl enable timelapse.service
+    chmod +x /etc/init.d/timelapse
+    /etc/init.d/timelapse enable
 }
 
 
 function restart_services {
     echo "Restarting Moonraker..."
-    sudo systemctl restart moonraker
+    /etc/init.d/moonraker restart
     echo "Restarting Klipper..."
-    sudo systemctl restart klipper
+    /etc/init.d/klipper restart
 }
 
 
