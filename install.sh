@@ -80,7 +80,7 @@ function install_script {
     #[ -f $SERVICE_FILE ] && return
     if [ -f $SERVICE_FILE ]; then
         # Force remove
-        sudo rm -f "$SERVICE_FILE"
+        rm -f "$SERVICE_FILE"
     fi
 
     echo "Installing system start script..."
