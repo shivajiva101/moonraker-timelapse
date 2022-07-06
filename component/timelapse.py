@@ -9,6 +9,7 @@ import os
 import glob
 import re
 import shutil
+import asyncio
 from datetime import datetime
 from tornado.ioloop import IOLoop
 from zipfile import ZipFile
@@ -35,11 +36,6 @@ class Timelapse:
 
     def __init__(self, confighelper: ConfigHelper) -> None:
 
-        self.confighelper = confighelper
-        self.server = confighelper.get_server()
-        self.klippy_apis: APIComp = self.server.lookup_component('klippy_apis')
-        database: DBComp = self.server.lookup_component("database")
-
         # setup vars
         self.renderisrunning = False
         self.saveisrunning = False
@@ -51,6 +47,18 @@ class Timelapse:
         self.byrendermacro = False
         self.hyperlapserunning = False
         self.printing = False
+        self.noWebcamDb = False
+
+        self.confighelper = confighelper
+        self.server = confighelper.get_server()
+        self.klippy_apis: APIComp = self.server.lookup_component('klippy_apis')
+        self.database: DBComp = self.server.lookup_component("database")
+        try:
+            self.webcams_db = self.database.wrap_namespace("webcams")
+        except Exception as e:
+            self.noWebcamDb = True
+            logging.info(f"No 'Webcams' namespace in database! "
+                         f"Exception: {e}")
 
         # setup static (nonDB) settings
         out_dir_cfg = confighelper.get(
@@ -67,11 +75,11 @@ class Timelapse:
             'camera': "",
             'snapshoturl': "http://localhost:8080/?action=snapshot",
             'stream_delay_compensation': 0.05,
-            'gcode_verbose': True,
+            'gcode_verbose': False,
             'parkhead': False,
             'parkpos': "back_left",
-            'park_custom_pos_x': 0.0,
-            'park_custom_pos_y': 0.0,
+            'park_custom_pos_x': 10.0,
+            'park_custom_pos_y': 10.0,
             'park_custom_pos_dz': 0.0,
             'park_travel_speed': 100,
             'park_retract_speed': 15,
@@ -94,23 +102,39 @@ class Timelapse:
             'rotation': 0,
             'flip_x': False,
             'flip_y': False,
-            'duplicatelastframe': 0,
+            'duplicatelastframe': 5,
             'previewimage': True,
             'saveframes': False
         }
 
         # Get Config from Database and overwrite defaults
-        dbconfig: Dict[str, Any] = database.get_item(
-            "timelapse", "config", self.config
-        )
-        self.config.update(dbconfig)
+        dbconfig: Dict[str, Any] = self.database.get_item("timelapse",
+                                                          "config",
+                                                          self.config)
+        if isinstance(dbconfig, asyncio.Future):
+            self.config.update(dbconfig.result())
+        else:
+            self.config.update(dbconfig)
 
         # Overwrite Config with fixed config made in moonraker.conf
         # this is a fallback to older setups and when the Frontend doesn't
         # support the settings endpoint
         self.overwriteDbconfigWithConfighelper()
 
-        self.getwebcamconfig()
+        # Read Webcam config from Database
+        try:
+            camUUID = self.config['camera']
+            if not self.config['camera'] == "" and not self.noWebcamDb:
+                webcamconfig = self.webcams_db[camUUID]
+                if isinstance(webcamconfig, asyncio.Future):
+                    self.parseWebcamConfig(webcamconfig.result())
+                else:
+                    self.parseWebcamConfig(webcamconfig)
+
+        except Exception as e:
+            logging.info(f"something went wrong getting Cam"
+                         f" UUID:'{camUUID}' from Database. "
+                         f"Exception: {e}")
 
         # check if ffmpeg is installed
         self.ffmpeg_installed = os.path.isfile(self.ffmpeg_binary_path)
@@ -183,32 +207,42 @@ class Timelapse:
         self.config.update({'blockedsettings': blockedsettings})
         logging.debug(f"blockedsettings {self.config['blockedsettings']}")
 
-    def getwebcamconfig(self) -> None:
-        database: DBComp = self.server.lookup_component("database")
-        snapshoturl = self.config['snapshoturl']
-        flip_x = False
-        flip_y = False
-
+    async def getWebcamConfig(self) -> None:
         try:
-            webcamconfig = database.get_item(
-                "webcams", self.config['camera']
-            )
-            snapshoturl = webcamconfig['urlSnapshot']
-            flip_x = webcamconfig['flipX']
-            flip_y = webcamconfig['flipY']
+            camUUID = self.config['camera']
+            if not self.config['camera'] == "" and not self.noWebcamDb:
+                webcamconfig = self.webcams_db[camUUID]
+                if isinstance(webcamconfig, asyncio.Future):
+                    self.parseWebcamConfig(await webcamconfig)
+                else:
+                    self.parseWebcamConfig(webcamconfig)
 
-        except Exception:
-            pass
-        finally:
-            self.config['snapshoturl'] = self.confighelper.get('snapshoturl',
-                                                               snapshoturl
-                                                               )
-            self.config['flip_x'] = self.confighelper.getboolean('flip_x',
-                                                                 flip_x
-                                                                 )
-            self.config['flip_y'] = self.confighelper.getboolean('flip_y',
-                                                                 flip_y
-                                                                 )
+        except Exception as e:
+            logging.info(f"something went wrong getting"
+                         f"Cam UUID:{camUUID} from Database. "
+                         f"Exception: {e}")
+
+    def parseWebcamConfig(self, webcamconfig) -> None:
+        snapshoturl = webcamconfig['urlSnapshot']
+        flip_x = webcamconfig['flipX']
+        flip_y = webcamconfig['flipY']
+
+        self.config['snapshoturl'] = self.confighelper.get('snapshoturl',
+                                                           snapshoturl
+                                                           )
+        self.config['flip_x'] = self.confighelper.getboolean('flip_x',
+                                                             flip_x
+                                                             )
+        self.config['flip_y'] = self.confighelper.getboolean('flip_y',
+                                                             flip_y
+                                                             )
+        logging.debug("snapshoturlConfig:"
+                      f"{self.config['snapshoturl']}")
+
+        logging.debug("flip x/y: "
+                      f"{self.config['flip_x']}/"
+                      f"{self.config['flip_y']}"
+                      )
 
         if not self.config['snapshoturl'].startswith('http'):
             if not self.config['snapshoturl'].startswith('/'):
@@ -217,9 +251,6 @@ class Timelapse:
             else:
                 self.config['snapshoturl'] = "http://localhost" + \
                                              self.config['snapshoturl']
-
-        # logging.debug(f"snapshoturl: {snapshoturl}")
-        logging.debug(f"snapshoturlConfig: {self.config['snapshoturl']}")
 
     async def webrequest_lastframeinfo(self,
                                        webrequest: WebRequest
@@ -234,7 +265,6 @@ class Timelapse:
                                   ) -> Dict[str, Any]:
         action = webrequest.get_action()
         if action == 'POST':
-            database: DBComp = self.server.lookup_component("database")
 
             args = webrequest.get_args()
             logging.debug("webreq_args: " + str(args))
@@ -267,14 +297,18 @@ class Timelapse:
 
                     self.config[setting] = settingvalue
 
-                    database.insert_item(
+                    self.database.insert_item(
                         "timelapse",
                         f"config.{setting}",
                         settingvalue
                     )
 
                     if setting == "camera":
-                        self.getwebcamconfig()
+                        if not self.noWebcamDb:
+                            await self.getWebcamConfig()
+                        else:
+                            logging.info("Webcam Namespace not intialized, "
+                                         "please restart moonraker service!")
 
                     if setting in settingsWithGcodechange:
                         gcodechange = True
@@ -350,13 +384,7 @@ class Timelapse:
                                  + "in hyperlapse mode"
                                  )
             else:
-                if not self.takingframe:
-                    self.takingframe = True
-                    self.spawn_newframe_callbacks()
-                else:
-                    logging.info("last take frame hasn't completed"
-                                 + " ignoring take frame command"
-                                 )
+                self.spawn_newframe_callbacks()
         else:
             logging.info("NEW_FRAME macro ignored timelapse is disabled")
 
@@ -382,16 +410,25 @@ class Timelapse:
             logging.exception(msg)
 
     async def start_hyperlapse(self) -> None:
-        gcommand = "HYPERLAPSE ACTION=START" \
-                   + f" CYCLE={self.config['hyperlapse_cycle']}"
+        hyperlapse_cycle = self.config['hyperlapse_cycle']
+        park_time = self.config['park_time']
+        timediff = hyperlapse_cycle - park_time
+        if timediff >= 1:
+            gcommand = "HYPERLAPSE ACTION=START" \
+                       + f" CYCLE={hyperlapse_cycle}"
 
-        logging.debug(f"run gcommand: {gcommand}")
-        try:
-            await self.klippy_apis.run_gcode(gcommand)
-        except self.server.error:
-            msg = f"Error executing GCode {gcommand}"
-            logging.exception(msg)
-        self.hyperlapserunning = True
+            logging.debug(f"run gcommand: {gcommand}")
+            try:
+                await self.klippy_apis.run_gcode(gcommand)
+            except self.server.error:
+                msg = f"Error executing GCode {gcommand}"
+                logging.exception(msg)
+            self.hyperlapserunning = True
+        else:
+            logging.info("WARNING: Blocked start of Hyperlapse, because "
+                         f"hyperlapse_cycle ({hyperlapse_cycle}s) is smaller "
+                         f"then or to close to park_time ({park_time}s)"
+                         )
 
     async def stop_hyperlapse(self) -> None:
         gcommand = "HYPERLAPSE ACTION=STOP"
@@ -405,10 +442,12 @@ class Timelapse:
         self.hyperlapserunning = False
 
     async def newframe(self) -> None:
+        # make sure webcamconfig is uptodate before grabbing a new frame
+        await self.getWebcamConfig()
+
         self.framecount += 1
-        snapshoturl = self.config['snapshoturl']
         framefile = "frame" + str(self.framecount).zfill(6) + ".jpg"
-        cmd = "wget " + snapshoturl + " -O " \
+        cmd = "wget " + self.config['snapshoturl'] + " -O " \
               + self.temp_dir + framefile
         self.lastframefile = framefile
         logging.debug(f"cmd: {cmd}")
@@ -539,7 +578,7 @@ class Timelapse:
         result = {'action': 'render'}
 
         # make sure webcamconfig is uptodate for the rotation/flip feature
-        self.getwebcamconfig()
+        await self.getWebcamConfig()
 
         if not filelist:
             msg = "no frames to render, skip"
@@ -622,7 +661,7 @@ class Timelapse:
                 + " '" + self.temp_dir + outfile + ".mp4' -y"
 
             # log and notify ws
-            logging.debug(f"start FFMPEG: {cmd}")
+            logging.info(f"start FFMPEG: {cmd}")
             result.update({
                 'status': 'started',
                 'framecount': str(self.framecount),
@@ -686,7 +725,7 @@ class Timelapse:
                             + " " + self.config['extraoutputparams'] \
                             + " '" + previewFilePath + "' -y"
 
-                        logging.debug(f"preview image cmd: {cmd}")
+                        logging.info(f"Rotate preview image cmd: {cmd}")
 
                         scmd = shell_cmd.build_shell_command(cmd)
                         try:
