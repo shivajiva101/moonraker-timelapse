@@ -26,7 +26,7 @@ SRCDIR="$(dirname "$(readlink -f "$0")")"
 # Default Parameters
 MOONRAKER_TARGET_DIR="${HOME}/moonraker/moonraker/components"
 SYSTEMDDIR="/etc/init.d"
-KLIPPER_CONFIG_DIR="${HOME}/klipper_config"
+KLIPPER_CONFIG_DIR="${HOME}/printer_data/config"
 FFMPEG_BIN="/usr/bin/ffmpeg"
 
 # Define text colors
