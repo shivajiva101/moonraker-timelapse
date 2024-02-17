@@ -11,11 +11,11 @@
 # https://github.com/protoloft/klipper_z_calibration/blob/master/install.sh
 
 # Prevent running as root.
-if [ ${UID} == 0 ]; then
-    echo -e "DO NOT RUN THIS SCRIPT AS 'root' !"
-    echo -e "If 'root' privileges needed, you will prompted for sudo password."
-    exit 1
-fi
+#if [ ${UID} == 0 ]; then
+    #echo -e "DO NOT RUN THIS SCRIPT AS 'root' !"
+    #echo -e "If 'root' privileges needed, you will prompted for sudo password."
+    #exit 1
+#fi
 
 # Force script to exit if an error occurs
 set -e
